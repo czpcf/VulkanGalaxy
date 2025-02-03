@@ -69,6 +69,8 @@ private:
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 	QueueFamilyIndices indices;
 	SwapchainSupportDetails details;
+	VkQueue uniformQueue;
+	VkQueue presentQueue;
 
 	// initialize the window using glfw
 	void initWindow() {
@@ -90,6 +92,7 @@ private:
 		setupDebugMessenger();
 		createSurface();
 		pickPhysicalDevice();
+		createLogicalDevice();
 	}
 
 	// create vulkan instance for all
@@ -162,6 +165,45 @@ private:
 		UT_CHECK_ERR(physicalDevice != VK_NULL_HANDLE, "failed to find a suitabale GPU");
 	}
 
+	// create logical device with queues and enable device features
+	void createLogicalDevice() {
+		std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
+		std::set<uint32_t> uniqueQueueFamilies = { indices.uniformFamily.value(), indices.presentFamily.value() };
+		float queuePriority = 1.0f;
+
+		for (uint32_t queueFamily : uniqueQueueFamilies) {
+			VkDeviceQueueCreateInfo queueCreateInfo{
+				.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+				.queueFamilyIndex = queueFamily,
+				.queueCount = 1,
+				.pQueuePriorities = &queuePriority,
+			};
+			queueCreateInfos.push_back(queueCreateInfo);
+		}
+
+		// TODO: add msaa feature
+
+		VkDeviceCreateInfo createInfo{
+			.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+			.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size()),
+			.pQueueCreateInfos = queueCreateInfos.data(),
+			.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size()),
+			.ppEnabledExtensionNames = deviceExtensions.data(),
+			.pEnabledFeatures = nullptr,
+		};
+		if (enableValidationLayers) {
+			createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+			createInfo.ppEnabledLayerNames = validationLayers.data();
+		} else {
+			createInfo.enabledLayerCount = 0;
+		}
+		UT_CHECK_ERR(vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) == VK_SUCCESS, "failed to create logical device");
+
+		// fetch queues
+		vkGetDeviceQueue(device, indices.uniformFamily.value(), 0, &uniformQueue);
+		vkGetDeviceQueue(device, indices.uniformFamily.value(), 0, &presentQueue);
+	}
+
 	void mainLoop() {
 		while (!glfwWindowShouldClose(window)) {
 			glfwPollEvents();
@@ -169,6 +211,7 @@ private:
 	}
 
 	void cleanup() {
+		vkDestroyDevice(device, nullptr);
 		if (enableValidationLayers) {
 			DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
 		}
