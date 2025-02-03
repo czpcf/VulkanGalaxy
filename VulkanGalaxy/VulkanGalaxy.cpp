@@ -9,6 +9,10 @@
 #include <iostream>
 #include <vector>
 #include <set>
+#include <cstdint>
+#include <limits>
+#include <algorithm>
+#include <fstream>
 #include <optional>
 #include "utils.hpp"
 
@@ -48,6 +52,10 @@ static std::vector<const char*> getRequiredExtensions();
 static bool isDeviceSuitable(VkPhysicalDevice, VkSurfaceKHR&);
 static QueueFamilyIndices findQueueFamilyProperties(VkPhysicalDevice, VkSurfaceKHR&);
 static SwapchainSupportDetails querySwapchainSupport(VkPhysicalDevice, VkSurfaceKHR&);
+static VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>&);
+static VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>&);
+static VkExtent2D chooseSwapExtent(GLFWwindow*, const VkSurfaceCapabilitiesKHR&);
+static VkImageView createImageView(VkDevice, VkImage, VkFormat, VkImageAspectFlags, uint32_t);
 
 
 class App {
@@ -71,6 +79,11 @@ private:
 	SwapchainSupportDetails details;
 	VkQueue uniformQueue;
 	VkQueue presentQueue;
+	VkSwapchainKHR swapchain;
+	VkFormat swapchainImageFormat;
+	VkExtent2D swapchainExtent;
+	std::vector<VkImage> swapchainImages;
+	std::vector<VkImageView> swapchainImageViews;
 
 	// initialize the window using glfw
 	void initWindow() {
@@ -93,6 +106,8 @@ private:
 		createSurface();
 		pickPhysicalDevice();
 		createLogicalDevice();
+		createSwapchain();
+		createImageViews();
 	}
 
 	// create vulkan instance for all
@@ -201,7 +216,65 @@ private:
 
 		// fetch queues
 		vkGetDeviceQueue(device, indices.uniformFamily.value(), 0, &uniformQueue);
-		vkGetDeviceQueue(device, indices.uniformFamily.value(), 0, &presentQueue);
+		vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
+	}
+
+	// swapchain
+	void createSwapchain() {
+		VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(details.formats);
+		VkPresentModeKHR presentMode = chooseSwapPresentMode(details.presentModes);
+		VkExtent2D extent = chooseSwapExtent(window, details.capabilities);
+		uint32_t imageCount = details.capabilities.minImageCount + 1;
+		if (details.capabilities.maxImageCount > 0 && imageCount > details.capabilities.maxImageCount) {
+			imageCount = details.capabilities.maxImageCount;
+		}
+		VkSwapchainCreateInfoKHR createInfo{
+			.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+			.surface = surface,
+			.minImageCount = imageCount,
+			.imageFormat = surfaceFormat.format,
+			.imageColorSpace = surfaceFormat.colorSpace,
+			.imageExtent = extent,
+			.imageArrayLayers = 1,
+			.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+			.preTransform = details.capabilities.currentTransform,
+			.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+			.presentMode = presentMode,
+			.clipped = VK_TRUE,
+			.oldSwapchain = VK_NULL_HANDLE,
+		};
+
+		uint32_t queueFamilyIndices[] = { indices.uniformFamily.value(), indices.presentFamily.value() };
+		if (indices.uniformFamily != indices.presentFamily) {
+			createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+			createInfo.queueFamilyIndexCount = 2;
+			createInfo.pQueueFamilyIndices = queueFamilyIndices;
+		} else {
+			createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			createInfo.queueFamilyIndexCount = 0;
+			createInfo.pQueueFamilyIndices = nullptr;
+		}
+		UT_CHECK_ERR(vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapchain) == VK_SUCCESS, "failed to create swapchain");
+		vkGetSwapchainImagesKHR(device, swapchain, &imageCount, nullptr);
+		swapchainImages.resize(imageCount);
+		vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapchainImages.data());
+		swapchainImageFormat = surfaceFormat.format;
+		swapchainExtent = extent;
+	}
+
+	// image view
+	void createImageViews() {
+		swapchainImageViews.resize(swapchainImages.size());
+		for (int i = 0; i < swapchainImages.size(); ++i) {
+			swapchainImageViews[i] = createImageView(device, swapchainImages[i], swapchainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+		}
+	}
+
+	void cleanupSwapchain() {
+		for (auto imageView : swapchainImageViews) {
+			vkDestroyImageView(device, imageView, nullptr);
+		}
+		vkDestroySwapchainKHR(device, swapchain, nullptr);
 	}
 
 	void mainLoop() {
@@ -211,6 +284,7 @@ private:
 	}
 
 	void cleanup() {
+		cleanupSwapchain();
 		vkDestroyDevice(device, nullptr);
 		if (enableValidationLayers) {
 			DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
@@ -287,6 +361,58 @@ static QueueFamilyIndices findQueueFamilyProperties(VkPhysicalDevice device, VkS
 	return indices;
 }
 
+static VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
+	for (const auto& format : availableFormats) {
+		if (format.format == VK_FORMAT_R8G8B8A8_SRGB && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+			return format;
+		}
+	}
+	return availableFormats[0];
+}
+
+static VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
+	for (const auto& mode : availablePresentModes) {
+		if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
+			return mode;
+		}
+	}
+	return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+static VkExtent2D chooseSwapExtent(GLFWwindow* window, const VkSurfaceCapabilitiesKHR& capabilities) {
+	if (capabilities.currentExtent.width != (std::numeric_limits<uint32_t>::max)()) {
+		return capabilities.currentExtent;
+	}
+	int width, height;
+	glfwGetFramebufferSize(window, &width, &height);
+	VkExtent2D actualExtent = {
+		static_cast<uint32_t>(width),
+		static_cast<uint32_t>(height),
+	};
+	actualExtent.width = std::clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+	actualExtent.height = std::clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+	return actualExtent;
+}
+
+// create a 2D image
+static VkImageView createImageView(VkDevice device, VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLeveles) {
+	VkImageViewCreateInfo viewInfo{
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		.image = image,
+		.viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = format,
+		.subresourceRange = {
+			.aspectMask = aspectFlags,
+			.baseMipLevel = 0,
+			.levelCount = mipLeveles,
+			.baseArrayLayer = 0,
+			.layerCount = 1,
+		},
+	};
+	VkImageView imageView;
+	UT_CHECK_ERR(vkCreateImageView(device, &viewInfo, nullptr, &imageView) == VK_SUCCESS, "failed to create texture image view");
+	return imageView;
+}
 
 int main() {
 	App app;
