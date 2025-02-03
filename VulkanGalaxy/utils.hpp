@@ -73,3 +73,23 @@ bool checkRequiredLayersSupport(const std::vector<const char*> requiredLayers) {
 	}
 	return true;
 }
+
+bool checkRequiredExtensionsSupport(VkPhysicalDevice device, const std::vector<const char*> requiredExtensions) {
+	uint32_t cnt;
+	vkEnumerateDeviceExtensionProperties(device, nullptr, &cnt, nullptr);
+	std::vector<VkExtensionProperties> availableExtensions(cnt);
+	vkEnumerateDeviceExtensionProperties(device, nullptr, &cnt, availableExtensions.data());
+	for (auto name : requiredExtensions) {
+		bool found = false;
+		for (auto& properties : availableExtensions) {
+			if (strcmp(name, properties.extensionName) == 0) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return false;
+		}
+	}
+	return true;
+}

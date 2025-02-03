@@ -8,6 +8,8 @@
 
 #include <iostream>
 #include <vector>
+#include <set>
+#include <optional>
 #include "utils.hpp"
 
 #ifdef NDEBUG
@@ -23,17 +25,30 @@ const std::vector<const char*> validationLayers = {
 	"VK_LAYER_KHRONOS_validation"
 };
 
+const std::vector<const char*> deviceExtensions = {
+	VK_KHR_SWAPCHAIN_EXTENSION_NAME
+};
 
-// get glfw & validation extensions
-static std::vector<const char*> getRequiredExtensions() {
-	uint32_t cnt = 0;
-	const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&cnt);
-	std::vector<const char*> extensions(glfwExtensions, glfwExtensions + cnt);
-	if (enableValidationLayers) {
-		extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+struct QueueFamilyIndices {
+	std::optional<uint32_t> uniformFamily; // uniform = graphics + compute
+	std::optional<uint32_t> presentFamily;
+
+	bool isComplete() const {
+		return uniformFamily.has_value() && presentFamily.has_value();
 	}
-	return extensions;
-}
+};
+
+struct SwapchainSupportDetails {
+	VkSurfaceCapabilitiesKHR capabilities;
+	std::vector<VkSurfaceFormatKHR> formats;
+	std::vector<VkPresentModeKHR> presentModes;
+};
+
+static std::vector<const char*> getRequiredExtensions();
+static bool isDeviceSuitable(VkPhysicalDevice, VkSurfaceKHR&);
+static QueueFamilyIndices findQueueFamilyProperties(VkPhysicalDevice, VkSurfaceKHR&);
+static SwapchainSupportDetails querySwapchainSupport(VkPhysicalDevice, VkSurfaceKHR&);
+
 
 class App {
 public:
@@ -46,9 +61,14 @@ public:
 		cleanup();
 	}
 private:
-	GLFWwindow *window;
+	GLFWwindow* window;
 	VkInstance instance;
 	VkDebugUtilsMessengerEXT debugMessenger;
+	VkSurfaceKHR surface;
+	VkDevice device;
+	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+	QueueFamilyIndices indices;
+	SwapchainSupportDetails details;
 
 	// initialize the window using glfw
 	void initWindow() {
@@ -68,6 +88,8 @@ private:
 	void initVulkan() {
 		createInstance();
 		setupDebugMessenger();
+		createSurface();
+		pickPhysicalDevice();
 	}
 
 	// create vulkan instance for all
@@ -113,6 +135,33 @@ private:
 		UT_CHECK_ERR(CreateDebugUtilsMessengerEXT(instance, &createInfo, nullptr, &debugMessenger) == VK_SUCCESS, "failed to setup debug messenger, check whether debug ext is not supported");
 	}
 
+	// create surface and bind it to the instance
+	void createSurface() {
+		UT_CHECK_ERR(glfwCreateWindowSurface(instance, window, nullptr, &surface) == VK_SUCCESS, "failed to create window surface");
+	}
+
+	// choose a suitable device
+	void pickPhysicalDevice() {
+		uint32_t cnt = 0;
+		vkEnumeratePhysicalDevices(instance, &cnt, nullptr);
+		UT_CHECK_ERR(cnt != 0, "failed to find GPUs with Vulkan support");
+		
+		std::vector<VkPhysicalDevice> devices(cnt);
+		vkEnumeratePhysicalDevices(instance, &cnt, devices.data());
+		for (const auto& device : devices) {
+			VkPhysicalDeviceProperties deviceProperties;
+			vkGetPhysicalDeviceProperties(device, &deviceProperties);
+			indices = findQueueFamilyProperties(device, surface);
+			details = querySwapchainSupport(device, surface);
+			if (isDeviceSuitable(device, surface)) {
+				physicalDevice = device;
+				// TODO: add msaa
+				break;
+			}
+		}
+		UT_CHECK_ERR(physicalDevice != VK_NULL_HANDLE, "failed to find a suitabale GPU");
+	}
+
 	void mainLoop() {
 		while (!glfwWindowShouldClose(window)) {
 			glfwPollEvents();
@@ -123,11 +172,78 @@ private:
 		if (enableValidationLayers) {
 			DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
 		}
+		vkDestroySurfaceKHR(instance, surface, nullptr);
 		vkDestroyInstance(instance, nullptr);
 		glfwDestroyWindow(window);
 		glfwTerminate();
 	}
 };
+
+
+// get glfw & validation extensions
+static std::vector<const char*> getRequiredExtensions() {
+	uint32_t cnt = 0;
+	const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&cnt);
+	std::vector<const char*> extensions(glfwExtensions, glfwExtensions + cnt);
+	if (enableValidationLayers) {
+		extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+	}
+	return extensions;
+}
+
+// chech if the device supports swapchain, extensions and features
+static bool isDeviceSuitable(VkPhysicalDevice device, VkSurfaceKHR& surface) {
+	QueueFamilyIndices indices = findQueueFamilyProperties(device, surface);
+	bool extensionsSupported = checkRequiredExtensionsSupport(device, deviceExtensions);
+	bool swapChainAdequate = false;
+	if (extensionsSupported) { // swapchain is included
+		SwapchainSupportDetails swapchainSupport = querySwapchainSupport(device, surface);
+		swapChainAdequate = !swapchainSupport.formats.empty() && !swapchainSupport.presentModes.empty();
+	}
+	VkPhysicalDeviceFeatures supportedFeatures;
+	vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
+	// TODO: check samplerAnisotropy if msaa is required
+	return indices.isComplete() && extensionsSupported && swapChainAdequate;
+}
+
+static SwapchainSupportDetails querySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR& surface) {
+	SwapchainSupportDetails details;
+	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+	uint32_t cnt;
+	vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &cnt, nullptr);
+	if (cnt != 0) {
+		details.formats.resize(cnt);
+		vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &cnt, details.formats.data());
+	}
+	vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &cnt, nullptr);
+	if (cnt != 0) {
+		details.presentModes.resize(cnt);
+		vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &cnt, details.presentModes.data());
+	}
+	return details;
+}
+
+static QueueFamilyIndices findQueueFamilyProperties(VkPhysicalDevice device, VkSurfaceKHR& surface) {
+	QueueFamilyIndices indices;
+	uint32_t cnt;
+	vkGetPhysicalDeviceQueueFamilyProperties(device, &cnt, nullptr);
+	std::vector<VkQueueFamilyProperties> queueFamilies(cnt);
+	vkGetPhysicalDeviceQueueFamilyProperties(device, &cnt, queueFamilies.data());
+	int i = 0;
+	for (const auto& queueFamily : queueFamilies) {
+		if ((queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) && (queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+			indices.uniformFamily = i;
+		}
+		VkBool32 presentSupport = false;
+		vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
+		if (presentSupport) {
+			indices.presentFamily = i;
+		}
+		++i;
+	}
+	return indices;
+}
+
 
 int main() {
 	App app;
