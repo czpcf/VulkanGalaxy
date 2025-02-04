@@ -22,6 +22,7 @@
 	const bool enableValidationLayers = true;
 #endif
 
+const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 const uint32_t WINDOW_WIDTH = 800;
 const uint32_t WINDOW_HEIGHT = 600;
 const std::string APP_NAME = "VulkanGalaxy";
@@ -56,7 +57,55 @@ static VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFor
 static VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>&);
 static VkExtent2D chooseSwapExtent(GLFWwindow*, const VkSurfaceCapabilitiesKHR&);
 static VkImageView createImageView(VkDevice, VkImage, VkFormat, VkImageAspectFlags, uint32_t);
+static uint32_t findMemoryType(VkPhysicalDevice, uint32_t, VkMemoryPropertyFlags);
 
+
+class Image2D {
+public:
+	// create a 2D image and bind it to the memory
+	void create(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format,
+		VkSampleCountFlagBits numSamples, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImageAspectFlags aspectFlags) {
+		VkImageCreateInfo imageInfo{
+			.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+			.flags = 0,
+			.imageType = VK_IMAGE_TYPE_2D,
+			.format = format,
+			.extent = {
+				.width = width,
+				.height = height,
+				.depth = 1,
+			},
+			.mipLevels = mipLevels,
+			.arrayLayers = 1,
+			.samples = numSamples,
+			.tiling = tiling,
+			.usage = usage,
+			.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		};
+
+		UT_CHECK_ERR(vkCreateImage(device, &imageInfo, nullptr, &image) == VK_SUCCESS, "failed to create image");
+		VkMemoryRequirements memRequirements;
+		vkGetImageMemoryRequirements(device, image, &memRequirements);
+		VkMemoryAllocateInfo allocInfo{
+			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+			.allocationSize = memRequirements.size,
+			.memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits, properties),
+		};
+		UT_CHECK_ERR(vkAllocateMemory(device, &allocInfo, nullptr, &memory) == VK_SUCCESS, "failed to allocate image momory");
+		UT_CHECK_ERR(vkBindImageMemory(device, image, memory, 0) == VK_SUCCESS, "failed to bind image to memory");
+		imageView = createImageView(device, image, format, aspectFlags, mipLevels);
+	}
+	void destroy(VkDevice device) const {
+		vkDestroyImageView(device, imageView, nullptr);
+		vkDestroyImage(device, image, nullptr);
+		vkFreeMemory(device, memory, nullptr);
+	}
+private:
+	VkImage image;
+	VkImageView imageView;
+	VkDeviceMemory memory;
+};
 
 class App {
 public:
@@ -84,6 +133,9 @@ private:
 	VkExtent2D swapchainExtent;
 	std::vector<VkImage> swapchainImages;
 	std::vector<VkImageView> swapchainImageViews;
+	VkCommandPool commandPool;
+	std::vector<VkCommandBuffer> commandBuffers;
+	Image2D colorImage;
 
 	// initialize the window using glfw
 	void initWindow() {
@@ -108,6 +160,10 @@ private:
 		createLogicalDevice();
 		createSwapchain();
 		createImageViews();
+
+		createCommandPool();
+		createCommandBuffers();
+		createResources();
 	}
 
 	// create vulkan instance for all
@@ -262,7 +318,7 @@ private:
 		swapchainExtent = extent;
 	}
 
-	// image view
+	// image views to swapchain
 	void createImageViews() {
 		swapchainImageViews.resize(swapchainImages.size());
 		for (int i = 0; i < swapchainImages.size(); ++i) {
@@ -270,7 +326,42 @@ private:
 		}
 	}
 
+	// command pool
+	void createCommandPool() {
+		VkCommandPoolCreateInfo poolInfo{
+			.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+			.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+			.queueFamilyIndex = indices.uniformFamily.value(),
+		};
+		UT_CHECK_ERR(vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) == VK_SUCCESS, "failed to create command pool");
+	}
+
+	// command buffer
+	void createCommandBuffers() {
+		commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+		VkCommandBufferAllocateInfo allocInfo{
+			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+			.commandPool = commandPool,
+			.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+			.commandBufferCount = (uint32_t)commandBuffers.size(),
+		};
+		UT_CHECK_ERR(vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) == VK_SUCCESS, "failed to allocate command buffers");
+	}
+
+	// color
+	void createResources() {
+		VkFormat colorFormat = swapchainImageFormat;
+		// TODO: msaa
+		colorImage.create(physicalDevice, device, swapchainExtent.width, swapchainExtent.height, 1, colorFormat,
+			VK_SAMPLE_COUNT_1_BIT,
+			VK_IMAGE_TILING_OPTIMAL,
+			VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			VK_IMAGE_ASPECT_COLOR_BIT);
+	}
+
 	void cleanupSwapchain() {
+		colorImage.destroy(device);
 		for (auto imageView : swapchainImageViews) {
 			vkDestroyImageView(device, imageView, nullptr);
 		}
@@ -285,10 +376,14 @@ private:
 
 	void cleanup() {
 		cleanupSwapchain();
+		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		}
+		vkDestroyCommandPool(device, commandPool, nullptr);
 		vkDestroyDevice(device, nullptr);
 		if (enableValidationLayers) {
 			DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
 		}
+		exit(0);
 		vkDestroySurfaceKHR(instance, surface, nullptr);
 		vkDestroyInstance(instance, nullptr);
 		glfwDestroyWindow(window);
@@ -394,7 +489,7 @@ static VkExtent2D chooseSwapExtent(GLFWwindow* window, const VkSurfaceCapabiliti
 	return actualExtent;
 }
 
-// create a 2D image
+// create a 2D image view
 static VkImageView createImageView(VkDevice device, VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLeveles) {
 	VkImageViewCreateInfo viewInfo{
 		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -412,6 +507,17 @@ static VkImageView createImageView(VkDevice device, VkImage image, VkFormat form
 	VkImageView imageView;
 	UT_CHECK_ERR(vkCreateImageView(device, &viewInfo, nullptr, &imageView) == VK_SUCCESS, "failed to create texture image view");
 	return imageView;
+}
+
+static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+	VkPhysicalDeviceMemoryProperties memProperties;
+	vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+	for (uint32_t i = 0; i < memProperties.memoryTypeCount; ++i) {
+		if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+			return i;
+		}
+	}
+	throw std::runtime_error("failed to find suitable memory type");
 }
 
 int main() {
