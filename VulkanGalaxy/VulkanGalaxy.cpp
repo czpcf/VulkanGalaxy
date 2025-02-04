@@ -7,6 +7,7 @@
 #include <GLFW/glfw3native.h>
 
 #include <iostream>
+#include <array>
 #include <vector>
 #include <set>
 #include <cstdint>
@@ -15,6 +16,13 @@
 #include <fstream>
 #include <optional>
 #include "utils.hpp"
+
+#define GLM_FORCE_RADIANS
+#define GLM_FORCE_LEFT_HANDED
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <chrono>
 
 #ifdef NDEBUG
 	const bool enableValidationLayers = false;
@@ -49,6 +57,12 @@ struct SwapchainSupportDetails {
 	std::vector<VkPresentModeKHR> presentModes;
 };
 
+struct MVP {
+	alignas(16) glm::mat4 model;
+	alignas(16) glm::mat4 view;
+	alignas(16) glm::mat4 proj;
+};
+
 static std::vector<const char*> getRequiredExtensions();
 static bool isDeviceSuitable(VkPhysicalDevice, VkSurfaceKHR&);
 static QueueFamilyIndices findQueueFamilyProperties(VkPhysicalDevice, VkSurfaceKHR&);
@@ -61,6 +75,7 @@ static uint32_t findMemoryType(VkPhysicalDevice, uint32_t, VkMemoryPropertyFlags
 static VkFormat findSupportedFormat(VkPhysicalDevice, const std::vector<VkFormat>&, VkImageTiling, VkFormatFeatureFlags);
 static bool hasStencilComponent(VkFormat);
 static VkFormat findDepthFormat(VkPhysicalDevice);
+static void createBuffer(VkPhysicalDevice, VkDevice, VkDeviceSize, VkBufferUsageFlags, VkMemoryPropertyFlags, VkBuffer&, VkDeviceMemory&);
 
 
 class Image2D {
@@ -140,6 +155,12 @@ private:
 	std::vector<VkCommandBuffer> commandBuffers;
 	Image2D colorImage;
 	Image2D depthImage;
+	VkRenderPass renderPass;
+	VkDescriptorSetLayout descriptorSetLayout;
+	VkDescriptorPool descriptorPool;
+	std::vector<VkBuffer> uniformBuffers;
+	std::vector<VkDeviceMemory> uniformBuffersMemory;
+	std::vector<void*> uniformBuffersMapped;
 
 	// initialize the window using glfw
 	void initWindow() {
@@ -164,10 +185,12 @@ private:
 		createLogicalDevice();
 		createSwapchain();
 		createImageViews();
-
+		createRenderPass();
 		createCommandPool();
 		createCommandBuffers();
 		createResources();
+		createDescriptorSetLayout();
+		createUniformBuffers();
 	}
 
 	// create vulkan instance for all
@@ -352,13 +375,120 @@ private:
 		UT_CHECK_ERR(vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) == VK_SUCCESS, "failed to allocate command buffers");
 	}
 
+	// render pass
+	void createRenderPass() {
+		// TODO: msaa
+		auto samples = VK_SAMPLE_COUNT_2_BIT;
+		VkAttachmentDescription colorAttachment{
+			.format = swapchainImageFormat,
+			.samples = samples,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		};
+		VkAttachmentDescription depthAttachment{
+			.format = findDepthFormat(physicalDevice),
+			.samples = samples,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		};
+		VkAttachmentDescription colorAttachmentResolve{
+			.format = swapchainImageFormat,
+			.samples = VK_SAMPLE_COUNT_1_BIT,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+			.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+		};
+		VkAttachmentReference colorAttachmentRef{
+			.attachment = 0,
+			.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		};
+		VkAttachmentReference depthAttachmentRef{
+			.attachment = 1,
+			.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		};
+		VkAttachmentReference colorAttachmentResolveRef{
+			.attachment = 2,
+			.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+		};
+
+		VkSubpassDescription subpass{
+			.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+			.colorAttachmentCount = 1,
+			.pColorAttachments = &colorAttachmentRef,
+			.pResolveAttachments = &colorAttachmentResolveRef,
+			.pDepthStencilAttachment = &depthAttachmentRef,
+		};
+		std::array<VkAttachmentDescription, 3> attachments = { colorAttachment, depthAttachment, colorAttachmentResolve };
+
+		VkSubpassDependency dependency{
+			.srcSubpass = VK_SUBPASS_EXTERNAL,
+			.dstSubpass = 0,
+			.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+			.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+			.srcAccessMask = 0,
+			.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		};
+
+		VkRenderPassCreateInfo renderPassInfo{
+			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+			.attachmentCount = static_cast<uint32_t>(attachments.size()),
+			.pAttachments = attachments.data(),
+			.subpassCount = 1,
+			.pSubpasses = &subpass,
+			.dependencyCount = 1,
+			.pDependencies = &dependency,
+		};
+
+		UT_CHECK_ERR(vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) == VK_SUCCESS, "failed to create render pass");
+	}
+
+	// descriptor, only related to shader
+	void createDescriptorSetLayout() {
+		// TODO: support multiple models
+		VkDescriptorSetLayoutBinding uboLayoutBinding{
+			.binding = 0,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.descriptorCount = 1,
+			.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+			.pImmutableSamplers = nullptr,
+		};
+
+		VkDescriptorSetLayoutBinding samplerLayoutBinding{
+			.binding = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.descriptorCount = 1,
+			.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+			.pImmutableSamplers = nullptr,
+		};
+		std::array<VkDescriptorSetLayoutBinding, 2> bindings = { uboLayoutBinding, samplerLayoutBinding };
+
+		VkDescriptorSetLayoutCreateInfo layoutInfo{
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+			.bindingCount = static_cast<uint32_t>(bindings.size()),
+			.pBindings = bindings.data(),
+		};
+
+		UT_CHECK_ERR(vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) == VK_SUCCESS, "failed to create descriptor set layout");
+	}
+
 	// color
 	void createResources() {
 		VkFormat colorFormat = swapchainImageFormat;
 		uint32_t width = swapchainExtent.width;
 		uint32_t height = swapchainExtent.height;
 		// TODO: msaa
-		VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+		VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_2_BIT;
 		colorImage.create(physicalDevice, device, width, height, 1, colorFormat,
 			samples,
 			VK_IMAGE_TILING_OPTIMAL,
@@ -372,6 +502,22 @@ private:
 			VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 			VK_IMAGE_ASPECT_DEPTH_BIT);
+	}
+
+	// uniform buffers
+	void createUniformBuffers() {
+		// TODO: support objects with different numbers of vertices
+		VkDeviceSize bufferSize = sizeof(MVP);
+		uniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+		uniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+		uniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+			createBuffer(physicalDevice, device, bufferSize,
+				VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				uniformBuffers[i], uniformBuffersMemory[i]);
+			vkMapMemory(device, uniformBuffersMemory[i], 0, bufferSize, 0, &uniformBuffersMapped[i]);
+		}
 	}
 
 	void cleanupSwapchain() {
@@ -391,14 +537,18 @@ private:
 
 	void cleanup() {
 		cleanupSwapchain();
+
+		vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+			vkDestroyBuffer(device, uniformBuffers[i], nullptr);
+			vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
 		}
 		vkDestroyCommandPool(device, commandPool, nullptr);
+		vkDestroyRenderPass(device, renderPass, nullptr);
 		vkDestroyDevice(device, nullptr);
 		if (enableValidationLayers) {
 			DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
 		}
-		exit(0);
 		vkDestroySurfaceKHR(instance, surface, nullptr);
 		vkDestroyInstance(instance, nullptr);
 		glfwDestroyWindow(window);
@@ -559,6 +709,29 @@ static VkFormat findDepthFormat(VkPhysicalDevice physicalDevice) {
 		{ VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT },
 		VK_IMAGE_TILING_OPTIMAL,
 		VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+}
+
+static void createBuffer(VkPhysicalDevice physicalDevice, VkDevice device, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+	VkBufferCreateInfo bufferInfo{
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.size = size,
+		.usage = usage,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+	};
+
+	UT_CHECK_ERR(vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) == VK_SUCCESS, "failed to create buffer");
+
+	VkMemoryRequirements memRequirements;
+	vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
+
+	VkMemoryAllocateInfo allocInfo{
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize = memRequirements.size,
+		.memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits, properties),
+	};
+
+	UT_CHECK_ERR(vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) == VK_SUCCESS, "failed to allocate buffer memory");
+	vkBindBufferMemory(device, buffer, bufferMemory, 0);
 }
 
 int main() {
