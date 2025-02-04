@@ -102,20 +102,6 @@ struct Vertex {
 	}
 };
 
-//struct Model {
-//	uint32_t mipLevels;
-//	VkImage textureImage;
-//	VkImageView textureImageView;
-//	VkDeviceMemory textureImageMemory;
-//	VkSampler textureSampler;
-//	std::string modelPath;
-//	std::string texturePath;
-//	void createModel(std::string _modelPath, std::string _texturePath) {
-//		modelPath = _modelPath;
-//		texturePath = _texturePath;
-//	}
-//};
-
 static std::vector<const char*> getRequiredExtensions();
 static bool isDeviceSuitable(VkPhysicalDevice, VkSurfaceKHR&);
 static QueueFamilyIndices findQueueFamilyProperties(VkPhysicalDevice, VkSurfaceKHR&);
@@ -135,46 +121,88 @@ static void copyBufferToImage(VkDevice, VkQueue, VkCommandPool, VkBuffer, VkImag
 static void generateMipmaps(VkPhysicalDevice, VkDevice, VkQueue, VkCommandPool, VkImage, VkFormat, int32_t, int32_t, uint32_t);
 static void loadModel(std::string, std::vector<Vertex>&, std::vector<uint32_t>&);
 static void transitionImageLayout(VkDevice, VkQueue, VkCommandPool, VkImage, VkFormat, VkImageLayout, VkImageLayout, uint32_t);
+static void createImage(VkPhysicalDevice, VkDevice, uint32_t, uint32_t, uint32_t, VkFormat, VkSampleCountFlagBits, VkImageTiling, VkImageUsageFlags, VkMemoryPropertyFlags, VkImage&, VkDeviceMemory&);
 
-void createImage(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format,
-	VkSampleCountFlagBits numSamples, VkImageTiling tiling, VkImageUsageFlags usage,
-	VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory) {
-
-	VkImageCreateInfo imageInfo{
-		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-		.flags = 0,
-		.imageType = VK_IMAGE_TYPE_2D,
-		.format = format,
-		.extent = {
-			.width = width,
-			.height = height,
-			.depth = 1,
-		},
-		.mipLevels = mipLevels,
-		.arrayLayers = 1,
-		.samples = numSamples,
-		.tiling = tiling,
-		.usage = usage,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-	};
-
-	if (vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS) {
-		throw std::runtime_error("failed to create image");
+class Model {
+public:
+	void createModel(std::string _modelPath, std::string _texturePath, VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, VkCommandPool commandPool) {
+		modelPath = _modelPath;
+		texturePath = _texturePath;
+		createTextureImage(physicalDevice, device, queue, commandPool);
+		createTextureImageView(device);
+		createTextureSampler(physicalDevice, device);
 	}
 
-	VkMemoryRequirements memRequirements;
-	vkGetImageMemoryRequirements(device, image, &memRequirements);
-	VkMemoryAllocateInfo allocInfo{
-		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.allocationSize = memRequirements.size,
-		.memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits, properties),
-	};
-	if (vkAllocateMemory(device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
-		throw std::runtime_error("failed to allocate image memory");
+	void destroy(VkDevice device) const {
+		vkDestroyImage(device, textureImage, nullptr);
+		vkDestroyImageView(device, textureImageView, nullptr);
+		vkDestroySampler(device, textureSampler, nullptr);
+		vkFreeMemory(device, textureImageMemory, nullptr);
 	}
-	vkBindImageMemory(device, image, imageMemory, 0);
-}
+private:
+	uint32_t mipLevels;
+	VkImage textureImage;
+	VkImageView textureImageView;
+	VkDeviceMemory textureImageMemory;
+	VkSampler textureSampler;
+	std::string modelPath;
+	std::string texturePath;
+
+	// get texture
+	void createTextureImage(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, VkCommandPool commandPool) {
+		int width, height, channels;
+		stbi_uc* pixels = stbi_load(texturePath.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+		VkDeviceSize imageSize = width * height * 4;
+		if (!pixels) {
+			throw std::runtime_error("failed to load texture");
+		}
+		mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
+		VkBuffer stagingBuffer;
+		VkDeviceMemory stagingBufferMemory;
+		createBuffer(physicalDevice, device, imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+		void* data;
+		vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
+		memcpy(data, pixels, static_cast<size_t>(imageSize));
+		vkUnmapMemory(device, stagingBufferMemory);
+		stbi_image_free(pixels);
+
+		createImage(physicalDevice, device, width, height, mipLevels, VK_FORMAT_R8G8B8A8_SRGB, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
+
+		transitionImageLayout(device, queue, commandPool, textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mipLevels);
+		copyBufferToImage(device, queue, commandPool, stagingBuffer, textureImage, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+		vkDestroyBuffer(device, stagingBuffer, nullptr);
+		vkFreeMemory(device, stagingBufferMemory, nullptr);
+		generateMipmaps(physicalDevice, device, queue, commandPool, textureImage, VK_FORMAT_R8G8B8A8_SRGB, width, height, mipLevels);
+	}
+
+	void createTextureImageView(VkDevice device) {
+		textureImageView = createImageView(device, textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, mipLevels);
+	}
+
+	void createTextureSampler(VkPhysicalDevice physicalDevice, VkDevice device) {
+		VkPhysicalDeviceProperties properties;
+		vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+		VkSamplerCreateInfo samplerInfo{
+			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+			.magFilter = VK_FILTER_LINEAR,
+			.minFilter = VK_FILTER_LINEAR,
+			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+			.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+			.mipLodBias = 0.0f,
+			.anisotropyEnable = VK_TRUE,
+			.maxAnisotropy = properties.limits.maxSamplerAnisotropy,
+			.compareEnable = VK_FALSE,
+			.compareOp = VK_COMPARE_OP_ALWAYS,
+			.minLod = 0.,
+			.maxLod = static_cast<float>(mipLevels),
+			.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+			.unnormalizedCoordinates = VK_FALSE,
+		};
+		UT_CHECK_ERR(vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler) == VK_SUCCESS, "failed to create texture sampler");
+	}
+};
 
 class Image2D {
 public:
@@ -260,13 +288,7 @@ private:
 	std::vector<VkDeviceMemory> uniformBuffersMemory;
 	std::vector<void*> uniformBuffersMapped;
 
-	// TODO: move into a structure
-	uint32_t mipLevels;
-	const std::string TEXTURE_PATH = "./textures/earth.png";
-	VkImage textureImage;
-	VkImageView textureImageView;
-	VkDeviceMemory textureImageMemory;
-	VkSampler textureSampler;
+	Model model;
 
 	// initialize the window using glfw
 	void initWindow() {
@@ -297,9 +319,7 @@ private:
 		createResources();
 		createDescriptorSetLayout();
 		createUniformBuffers();
-		createTextureImage();
-		createTextureImageView();
-		createTextureSampler();
+		createModels();
 	}
 
 	// create vulkan instance for all
@@ -614,61 +634,6 @@ private:
 			VK_IMAGE_ASPECT_DEPTH_BIT);
 	}
 
-	// get texture
-	void createTextureImage() {
-		int width, height, channels;
-		stbi_uc* pixels = stbi_load(TEXTURE_PATH.c_str(), &width, &height, &channels, STBI_rgb_alpha);
-		VkDeviceSize imageSize = width * height * 4;
-		if (!pixels) {
-			throw std::runtime_error("failed to load texture");
-		}
-		mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
-		VkBuffer stagingBuffer;
-		VkDeviceMemory stagingBufferMemory;
-		createBuffer(physicalDevice, device, imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-		void* data;
-		vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-		memcpy(data, pixels, static_cast<size_t>(imageSize));
-		vkUnmapMemory(device, stagingBufferMemory);
-		stbi_image_free(pixels);
-
-		createImage(physicalDevice, device, width, height, mipLevels, VK_FORMAT_R8G8B8A8_SRGB, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
-
-		transitionImageLayout(device, uniformQueue, commandPool, textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mipLevels);
-		copyBufferToImage(device, uniformQueue, commandPool, stagingBuffer, textureImage, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
-		vkDestroyBuffer(device, stagingBuffer, nullptr);
-		vkFreeMemory(device, stagingBufferMemory, nullptr);
-		generateMipmaps(physicalDevice, device, uniformQueue, commandPool, textureImage, VK_FORMAT_R8G8B8A8_SRGB, width, height, mipLevels);
-	}
-
-	void createTextureImageView() {
-		textureImageView = createImageView(device, textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, mipLevels);
-	}
-
-	void createTextureSampler() {
-		VkPhysicalDeviceProperties properties;
-		vkGetPhysicalDeviceProperties(physicalDevice, &properties);
-		VkSamplerCreateInfo samplerInfo{
-			.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-			.magFilter = VK_FILTER_LINEAR,
-			.minFilter = VK_FILTER_LINEAR,
-			.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-			.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-			.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-			.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-			.mipLodBias = 0.0f,
-			.anisotropyEnable = VK_TRUE,
-			.maxAnisotropy = properties.limits.maxSamplerAnisotropy,
-			.compareEnable = VK_FALSE,
-			.compareOp = VK_COMPARE_OP_ALWAYS,
-			.minLod = 0.,
-			.maxLod = static_cast<float>(mipLevels),
-			.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
-			.unnormalizedCoordinates = VK_FALSE,
-		};
-		UT_CHECK_ERR(vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler) == VK_SUCCESS, "failed to create texture sampler");
-	}
-
 	// uniform buffers
 	void createUniformBuffers() {
 		// TODO: support objects with different numbers of vertices
@@ -683,6 +648,10 @@ private:
 				uniformBuffers[i], uniformBuffersMemory[i]);
 			vkMapMemory(device, uniformBuffersMemory[i], 0, bufferSize, 0, &uniformBuffersMapped[i]);
 		}
+	}
+
+	void createModels() {
+		model.createModel("./models/earth.obj", "./textures/earth.png", physicalDevice, device, uniformQueue, commandPool);
 	}
 
 	void cleanupSwapchain() {
@@ -703,10 +672,7 @@ private:
 	void cleanup() {
 		cleanupSwapchain();
 
-		vkDestroyImage(device, textureImage, nullptr);
-		vkDestroyImageView(device, textureImageView, nullptr);
-		vkDestroySampler(device, textureSampler, nullptr);
-		vkFreeMemory(device, textureImageMemory, nullptr);
+		model.destroy(device);
 
 		vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -1149,6 +1115,46 @@ static void transitionImageLayout(VkDevice device, VkQueue queue, VkCommandPool 
 		1, &barrier
 	);
 	endSingleTimeCommands(device, queue, commandPool, commandBuffer);
+}
+
+static void createImage(VkPhysicalDevice physicalDevice, VkDevice device, uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format,
+	VkSampleCountFlagBits numSamples, VkImageTiling tiling, VkImageUsageFlags usage,
+	VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory) {
+
+	VkImageCreateInfo imageInfo{
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.flags = 0,
+		.imageType = VK_IMAGE_TYPE_2D,
+		.format = format,
+		.extent = {
+			.width = width,
+			.height = height,
+			.depth = 1,
+		},
+		.mipLevels = mipLevels,
+		.arrayLayers = 1,
+		.samples = numSamples,
+		.tiling = tiling,
+		.usage = usage,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	};
+
+	if (vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS) {
+		throw std::runtime_error("failed to create image");
+	}
+
+	VkMemoryRequirements memRequirements;
+	vkGetImageMemoryRequirements(device, image, &memRequirements);
+	VkMemoryAllocateInfo allocInfo{
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize = memRequirements.size,
+		.memoryTypeIndex = findMemoryType(physicalDevice, memRequirements.memoryTypeBits, properties),
+	};
+	if (vkAllocateMemory(device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
+		throw std::runtime_error("failed to allocate image memory");
+	}
+	vkBindImageMemory(device, image, imageMemory, 0);
 }
 
 int main() {
