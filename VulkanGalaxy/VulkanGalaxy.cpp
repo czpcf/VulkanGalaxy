@@ -58,6 +58,9 @@ static VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR
 static VkExtent2D chooseSwapExtent(GLFWwindow*, const VkSurfaceCapabilitiesKHR&);
 static VkImageView createImageView(VkDevice, VkImage, VkFormat, VkImageAspectFlags, uint32_t);
 static uint32_t findMemoryType(VkPhysicalDevice, uint32_t, VkMemoryPropertyFlags);
+static VkFormat findSupportedFormat(VkPhysicalDevice, const std::vector<VkFormat>&, VkImageTiling, VkFormatFeatureFlags);
+static bool hasStencilComponent(VkFormat);
+static VkFormat findDepthFormat(VkPhysicalDevice);
 
 
 class Image2D {
@@ -136,6 +139,7 @@ private:
 	VkCommandPool commandPool;
 	std::vector<VkCommandBuffer> commandBuffers;
 	Image2D colorImage;
+	Image2D depthImage;
 
 	// initialize the window using glfw
 	void initWindow() {
@@ -351,17 +355,28 @@ private:
 	// color
 	void createResources() {
 		VkFormat colorFormat = swapchainImageFormat;
+		uint32_t width = swapchainExtent.width;
+		uint32_t height = swapchainExtent.height;
 		// TODO: msaa
-		colorImage.create(physicalDevice, device, swapchainExtent.width, swapchainExtent.height, 1, colorFormat,
-			VK_SAMPLE_COUNT_1_BIT,
+		VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+		colorImage.create(physicalDevice, device, width, height, 1, colorFormat,
+			samples,
 			VK_IMAGE_TILING_OPTIMAL,
 			VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 			VK_IMAGE_ASPECT_COLOR_BIT);
+		auto depthFormat = findDepthFormat(physicalDevice);
+		depthImage.create(physicalDevice, device, width, height, 1, depthFormat,
+			samples,
+			VK_IMAGE_TILING_OPTIMAL,
+			VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			VK_IMAGE_ASPECT_DEPTH_BIT);
 	}
 
 	void cleanupSwapchain() {
 		colorImage.destroy(device);
+		depthImage.destroy(device);
 		for (auto imageView : swapchainImageViews) {
 			vkDestroyImageView(device, imageView, nullptr);
 		}
@@ -518,6 +533,32 @@ static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFil
 		}
 	}
 	throw std::runtime_error("failed to find suitable memory type");
+}
+
+static VkFormat findSupportedFormat(VkPhysicalDevice physicalDevice, const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features) {
+	for (VkFormat format : candidates) {
+		VkFormatProperties props;
+		vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
+		if (tiling == VK_IMAGE_TILING_LINEAR && (props.linearTilingFeatures & features) == features) {
+			return format;
+		} else if (tiling == VK_IMAGE_TILING_OPTIMAL && (props.optimalTilingFeatures & features) == features) {
+			return format;
+		} else {
+			throw std::runtime_error("not supported tiling format");
+		}
+	}
+	throw std::runtime_error("failed to find supported format");
+}
+
+static bool hasStencilComponent(VkFormat format) {
+	return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
+}
+
+static VkFormat findDepthFormat(VkPhysicalDevice physicalDevice) {
+	return findSupportedFormat(physicalDevice,
+		{ VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT },
+		VK_IMAGE_TILING_OPTIMAL,
+		VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
 }
 
 int main() {
