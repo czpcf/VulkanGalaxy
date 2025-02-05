@@ -400,6 +400,8 @@ private:
 
 	Model model;
 
+	bool framebufferResized = false;
+
 	VkSampleCountFlagBits getMaxUsableSampleCount() {
 		VkPhysicalDeviceProperties physicalDeviceProperties;
 		vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
@@ -423,9 +425,10 @@ private:
 		glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
 	}
 
-	// TODO
 	// recreate swapchain upon resizing the window
 	static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
+		auto app = reinterpret_cast<App*>(glfwGetWindowUserPointer(window));
+		app->framebufferResized = true;
 	}
 
 	// initialize vulkan
@@ -563,6 +566,8 @@ private:
 
 	// swapchain
 	void createSwapchain() {
+		// details should be recreated too
+		details = querySwapchainSupport(physicalDevice, surface);
 		VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(details.formats);
 		VkPresentModeKHR presentMode = chooseSwapPresentMode(details.presentModes);
 		VkExtent2D extent = chooseSwapExtent(window, details.capabilities);
@@ -1043,9 +1048,28 @@ private:
 	}
 
 	void mainLoop() {
+		int width, height;
+		glfwGetWindowSize(window, &width, &height);
+		auto lastTime = std::chrono::high_resolution_clock::now();
+		int frames = 0;
 		while (!glfwWindowShouldClose(window)) {
+			auto currentTime = std::chrono::high_resolution_clock::now();
+			glfwGetWindowSize(window, &width, &height);
+			while (width == 0 || height == 0) {
+				glfwWaitEvents();
+				glfwGetWindowSize(window, &width, &height);
+			}
 			drawFrame();
 			glfwPollEvents();
+			frames += 1;
+			auto fpsDeltaTime = std::chrono::duration<double>(currentTime - lastTime).count();
+			if (fpsDeltaTime > 0.5) {
+				lastTime = currentTime;
+				double fps = frames / fpsDeltaTime;
+				frames = 0;
+				std::string title = APP_NAME + "- FPS: " + std::to_string((int)fps);
+				glfwSetWindowTitle(window, title.c_str());
+			}
 		}
 		vkDeviceWaitIdle(device);
 	}
@@ -1213,9 +1237,9 @@ private:
 			.pImageIndices = &imageIndex,
 			.pResults = nullptr,
 		};
-		// TODO: add resize check
 		result = vkQueuePresentKHR(presentQueue, &presentInfo);
-		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
+			framebufferResized = false;
 			recreateSwapchain();
 		} else if (result != VK_SUCCESS) {
 			throw std::runtime_error("failed to present the swap chain image");
@@ -1309,11 +1333,13 @@ static VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR
 }
 
 static VkExtent2D chooseSwapExtent(GLFWwindow* window, const VkSurfaceCapabilitiesKHR& capabilities) {
+	std::cout << "GG" << capabilities.currentExtent.width << " " << capabilities.currentExtent.height << std::endl;
 	if (capabilities.currentExtent.width != (std::numeric_limits<uint32_t>::max)()) {
 		return capabilities.currentExtent;
 	}
 	int width, height;
 	glfwGetFramebufferSize(window, &width, &height);
+	std::cout << "???" << width << " " << height << std::endl;
 	VkExtent2D actualExtent = {
 		static_cast<uint32_t>(width),
 		static_cast<uint32_t>(height),
