@@ -119,7 +119,6 @@ static VkCommandBuffer beginSingleTimeCommands(VkDevice, VkCommandPool);
 static void endSingleTimeCommands(VkDevice, VkQueue, VkCommandPool, VkCommandBuffer);
 static void copyBufferToImage(VkDevice, VkQueue, VkCommandPool, VkBuffer, VkImage, uint32_t, uint32_t);
 static void generateMipmaps(VkPhysicalDevice, VkDevice, VkQueue, VkCommandPool, VkImage, VkFormat, int32_t, int32_t, uint32_t);
-static void loadModel(std::string, std::vector<Vertex>&, std::vector<uint32_t>&);
 static void transitionImageLayout(VkDevice, VkQueue, VkCommandPool, VkImage, VkFormat, VkImageLayout, VkImageLayout, uint32_t);
 static void createImage(VkPhysicalDevice, VkDevice, uint32_t, uint32_t, uint32_t, VkFormat, VkSampleCountFlagBits, VkImageTiling, VkImageUsageFlags, VkMemoryPropertyFlags, VkImage&, VkDeviceMemory&);
 static void copyBuffer(VkDevice, VkQueue, VkCommandPool, VkBuffer, VkBuffer, VkDeviceSize);
@@ -132,7 +131,20 @@ public:
 	VkBuffer indexBuffer;
 	std::vector<Vertex> vertices;
 	std::vector<uint32_t> indices;
-	void createModel(std::string _modelPath, std::string _texturePath, VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, VkCommandPool commandPool) {
+	float sizeScale;
+	float speed;
+	float speedSelf;
+	glm::vec3 origin;
+	glm::vec3 pivot;
+
+	Model() {}
+	Model(std::string _modelPath, std::string _texturePath, VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, VkCommandPool commandPool,
+		float scale = 1.0f, float _speed = 1.0f, float _speedSelf = 1.0f, glm::vec3 _origin = glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3 _pivot = glm::vec3(0.0f, 0.0f, 0.0f)) {
+		createModel(_modelPath, _texturePath, physicalDevice, device, queue, commandPool, scale, _speed, _speedSelf, _origin, _pivot);
+	}
+
+	void createModel(std::string _modelPath, std::string _texturePath, VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, VkCommandPool commandPool,
+		float scale = 1.0f, float _speed = 1.0f, float _speedSelf = 1.0f, glm::vec3 _origin = glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3 _pivot = glm::vec3(0.0f, 0.0f, 0.0f)) {
 		modelPath = _modelPath;
 		texturePath = _texturePath;
 		createTextureImage(physicalDevice, device, queue, commandPool);
@@ -141,6 +153,11 @@ public:
 		loadModel();
 		createVertexBuffer(physicalDevice, device, queue, commandPool);
 		createIndexBuffer(physicalDevice, device, queue, commandPool);
+		sizeScale = scale;
+		speed = _speed;
+		speedSelf = _speedSelf;
+		origin = _origin;
+		pivot = _pivot;
 	}
 
 	void destroy(VkDevice device) const {
@@ -254,14 +271,14 @@ private:
 
 				vertex.color = { 1.0f, 1.0f, 1.0f };
 				vertices.push_back(vertex);
-				indices.push_back(indices.size());
+				indices.push_back(static_cast<uint32_t>(indices.size()));
 			}
 		}
 
 	}
 
 	void createVertexBuffer(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, VkCommandPool commandPool) {
-		VkDeviceSize size = sizeof(vertices) * vertices.size();
+		VkDeviceSize size = sizeof(vertices[0]) * vertices.size();
 		VkBuffer stagingBuffer;
 		VkDeviceMemory stagingBufferMemory;
 		createBuffer(physicalDevice, device, size,
@@ -283,7 +300,7 @@ private:
 	}
 
 	void createIndexBuffer(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, VkCommandPool commandPool) {
-		VkDeviceSize size = sizeof(indices) * indices.size();
+		VkDeviceSize size = sizeof(indices[0]) * indices.size();
 		VkBuffer stagingBuffer;
 		VkDeviceMemory stagingBufferMemory;
 		createBuffer(physicalDevice, device, size,
@@ -291,7 +308,7 @@ private:
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
 			stagingBuffer, stagingBufferMemory);
 		void* data;
-		vkMapMemory(device, stagingBufferMemory, 0, size, 0, &data);
+		UT_CHECK_ERR(vkMapMemory(device, stagingBufferMemory, 0, size, 0, &data) == VK_SUCCESS, "failed to map memory");
 		memcpy(data, indices.data(), (size_t)size);
 		vkUnmapMemory(device, stagingBufferMemory);
 
@@ -388,7 +405,7 @@ private:
 	std::vector<VkBuffer> uniformBuffers; // for model projection matrix
 	std::vector<VkDeviceMemory> uniformBuffersMemory;
 	std::vector<void*> uniformBuffersMapped;
-	std::vector<VkDescriptorSet> descriptorSets;
+	std::vector<std::vector<VkDescriptorSet>> descriptorSets; // [frame][modeId]
 	VkPipelineLayout graphicsPipelineLayout;
 	VkPipeline graphicsPipeline;
 	std::vector<VkFramebuffer> swapchainFramebuffers;
@@ -398,9 +415,19 @@ private:
 	int currentFrame = 0;
 	VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT; // TODO: things may be incorrecnt if msaa == 1
 
-	Model model;
+	std::vector<Model> models;
 
 	bool framebufferResized = false;
+	const float MAX_SCROLL_SCALE = 3.0f;
+	const float MIN_SCROLL_SCALE = 0.02f;
+	float scrollScale = 1.0f;
+	float scrollSpeed = 0.0f;
+
+	bool isDragging = false;
+	double lastMouseX = 0.0, lastMouseY = 0.0;
+	float yaw = 0.0f;
+	float pitch = 0.0f;
+	const float mouseSensitivity = 0.1f;
 
 	VkSampleCountFlagBits getMaxUsableSampleCount() {
 		VkPhysicalDeviceProperties physicalDeviceProperties;
@@ -423,12 +450,51 @@ private:
 		window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, APP_NAME.c_str(), nullptr, nullptr);
 		glfwSetWindowUserPointer(window, this);
 		glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+		glfwSetScrollCallback(window, scrollCallback);
+		glfwSetCursorPosCallback(window, mouseMoveCallback);
+		glfwSetMouseButtonCallback(window, mouseButtonCallback);
 	}
 
 	// recreate swapchain upon resizing the window
 	static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
 		auto app = reinterpret_cast<App*>(glfwGetWindowUserPointer(window));
 		app->framebufferResized = true;
+	}
+	
+	static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
+		auto app = reinterpret_cast<App*>(glfwGetWindowUserPointer(window));
+		app->scrollSpeed += yoffset;
+	}
+
+	static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+		auto app = reinterpret_cast<App*>(glfwGetWindowUserPointer(window));
+
+		if (button == GLFW_MOUSE_BUTTON_LEFT) {
+			if (action == GLFW_PRESS) {
+				glfwGetCursorPos(window, &app->lastMouseX, &app->lastMouseY);
+				app->isDragging = true;
+			} else if (action == GLFW_RELEASE) {
+				app->isDragging = false;
+			}
+		}
+	}
+
+	static void mouseMoveCallback(GLFWwindow* window, double xpos, double ypos) {
+		auto app = reinterpret_cast<App*>(glfwGetWindowUserPointer(window));
+
+		if (app->isDragging) {
+			float xoffset = static_cast<float>(xpos - app->lastMouseX);
+			float yoffset = static_cast<float>(app->lastMouseY - ypos);
+
+			app->lastMouseX = xpos;
+			app->lastMouseY = ypos;
+
+			app->yaw += xoffset * app->mouseSensitivity;
+			app->pitch -= yoffset * app->mouseSensitivity;
+
+			if (app->pitch > 89.0f) app->pitch = 89.0f;
+			if (app->pitch < -89.0f) app->pitch = -89.0f;
+		}
 	}
 
 	// initialize vulkan
@@ -443,10 +509,10 @@ private:
 		createRenderPass();
 		createCommandPool();
 		createCommandBuffers();
+		createModels();
+		createUniformBuffers();
 		createResources();
 		createDescriptorSetLayout();
-		createUniformBuffers();
-		createModels();
 		createDescriptorPool();
 		createDescriptorSets();
 		createGraphicsPipeline();
@@ -765,8 +831,7 @@ private:
 
 	// uniform buffers
 	void createUniformBuffers() {
-		// TODO: support objects with different numbers of vertices
-		VkDeviceSize bufferSize = sizeof(MVP);
+		VkDeviceSize bufferSize = sizeof(MVP) * models.size();
 		uniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 		uniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
 		uniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
@@ -780,19 +845,21 @@ private:
 	}
 
 	void createModels() {
-		model.createModel("./models/earth.obj", "./textures/earth.png", physicalDevice, device, uniformQueue, commandPool);
+		models.push_back(Model("./models/ball.obj", "./textures/sun.png", physicalDevice, device, uniformQueue, commandPool,
+			1.0f, 0.0f, 1.0f, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f)));
+		models.push_back(Model("./models/ball.obj", "./textures/earth.png", physicalDevice, device, uniformQueue, commandPool,
+			0.3f, 1.0f, 1.0f, glm::vec3(2.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f)));
 	}
 
 	void createDescriptorPool() {
-		// TODO: increase pool size
 		std::array<VkDescriptorPoolSize, 2> poolSizes{};
 		poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+		poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT * models.size());
 		poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+		poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT * models.size());
 		VkDescriptorPoolCreateInfo poolInfo{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-			.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT),
+			.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT * models.size()),
 			.poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
 			.pPoolSizes = poolSizes.data(),
 		};
@@ -800,44 +867,49 @@ private:
 	}
 
 	void createDescriptorSets() {
-		std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
+		std::vector<VkDescriptorSetLayout> layouts(models.size(), descriptorSetLayout);
 		VkDescriptorSetAllocateInfo allocInfo{
 			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 			.descriptorPool = descriptorPool,
-			.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT),
+			.descriptorSetCount = static_cast<uint32_t>(models.size()),
 			.pSetLayouts = layouts.data(),
 		};
 		descriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
-		UT_CHECK_ERR(vkAllocateDescriptorSets(device, &allocInfo, descriptorSets.data()) == VK_SUCCESS, "failed to allocate descriptor sets");
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-			VkDescriptorBufferInfo bufferInfo{
-				.buffer = uniformBuffers[i],
-				.offset = 0,
-				.range = sizeof(MVP),
-			};
-			// TODO: add descriptors of different models
-			std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
-			descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			descriptorWrites[0].dstSet = descriptorSets[i];
-			descriptorWrites[0].dstBinding = 0;
-			descriptorWrites[0].dstArrayElement = 0;
-			descriptorWrites[0].descriptorCount = 1;
-			descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			descriptorWrites[0].pImageInfo = nullptr;
-			descriptorWrites[0].pBufferInfo = &bufferInfo;
-			descriptorWrites[0].pTexelBufferView = nullptr;
+			std::vector<VkDescriptorSet> sets;
+			sets.resize(models.size());
+			UT_CHECK_ERR(vkAllocateDescriptorSets(device, &allocInfo, sets.data()) == VK_SUCCESS, "failed to allocate descriptor sets");
+			for (int modelId = 0; modelId < models.size(); ++modelId) {
+				VkDescriptorBufferInfo bufferInfo{
+					.buffer = uniformBuffers[i],
+					.offset = sizeof(MVP) * modelId, // use the j-th MVP object
+					.range = sizeof(MVP),
+				};
+				// TODO: add descriptors of different models
+				std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+				descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				descriptorWrites[0].dstSet = sets[modelId];
+				descriptorWrites[0].dstBinding = 0;
+				descriptorWrites[0].dstArrayElement = 0;
+				descriptorWrites[0].descriptorCount = 1;
+				descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				descriptorWrites[0].pImageInfo = nullptr;
+				descriptorWrites[0].pBufferInfo = &bufferInfo;
+				descriptorWrites[0].pTexelBufferView = nullptr;
 
-			auto info = model.getDescriptorImageInfo();
-			descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			descriptorWrites[1].dstSet = descriptorSets[i];
-			descriptorWrites[1].dstBinding = 1;
-			descriptorWrites[1].dstArrayElement = 0;
-			descriptorWrites[1].descriptorCount = 1;
-			descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			descriptorWrites[1].pImageInfo = &info;
-			descriptorWrites[1].pBufferInfo = nullptr;
-			descriptorWrites[1].pTexelBufferView = nullptr;
-			vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+				auto info = models[modelId].getDescriptorImageInfo();
+				descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				descriptorWrites[1].dstSet = sets[modelId];
+				descriptorWrites[1].dstBinding = 1;
+				descriptorWrites[1].dstArrayElement = 0;
+				descriptorWrites[1].descriptorCount = 1;
+				descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				descriptorWrites[1].pImageInfo = &info;
+				descriptorWrites[1].pBufferInfo = nullptr;
+				descriptorWrites[1].pTexelBufferView = nullptr;
+				vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+			}
+			descriptorSets[i] = sets;
 		}
 	}
 
@@ -1070,6 +1142,16 @@ private:
 				std::string title = APP_NAME + "- FPS: " + std::to_string((int)fps);
 				glfwSetWindowTitle(window, title.c_str());
 			}
+
+			const float c = 1.0f;
+			const float t = 100.0f;
+			const float d = 0.1f;
+			float resist = std::max(c / (MAX_SCROLL_SCALE - scrollScale), c / (scrollScale - MIN_SCROLL_SCALE));
+			scrollSpeed *= 0.98;
+			float updateSpeed = std::clamp(scrollSpeed, -d, d);
+			updateSpeed = std::min(updateSpeed, MAX_SCROLL_SCALE - scrollScale);
+			updateSpeed = std::max(updateSpeed, MIN_SCROLL_SCALE - scrollScale);
+			scrollScale = scrollScale + updateSpeed / std::max(t, resist);
 		}
 		vkDeviceWaitIdle(device);
 	}
@@ -1079,7 +1161,9 @@ private:
 
 		vkDestroyPipeline(device, graphicsPipeline, nullptr);
 		vkDestroyPipelineLayout(device, graphicsPipelineLayout, nullptr);
-		model.destroy(device);
+		for (auto& model : models) {
+			model.destroy(device);
+		}
 		
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 			vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
@@ -1117,18 +1201,43 @@ private:
 	}
 
 	void updateUniformBuffer(uint32_t index) {
-		// TODO: modify logics here
 		static auto startTime = std::chrono::high_resolution_clock::now();
 		auto currentTime = std::chrono::high_resolution_clock::now();
 		float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
-		MVP ubo{
-			.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f)),
-			.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f)),
-			.proj = glm::perspective(glm::radians(45.0f), swapchainExtent.width / (float)swapchainExtent.height, 0.1f, 10.0f),
-		};
-		ubo.proj[1][1] *= -1;
-		memcpy(uniformBuffersMapped[index], &ubo, sizeof(ubo));
+		//auto view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+		float radius = 3.0;
+		glm::vec3 cameraPos;
+		cameraPos.x = radius * cos(glm::radians(yaw)) * cos(glm::radians(pitch));
+		cameraPos.y = radius * sin(glm::radians(yaw)) * cos(glm::radians(pitch));
+		cameraPos.z = radius * sin(glm::radians(pitch));
+
+		glm::vec3 lookAt = glm::vec3(0.0f, 0.0f, 0.0f);
+		glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
+		glm::mat4 view = glm::lookAt(cameraPos, lookAt, up);
+
+		auto proj = glm::perspective(glm::radians(45.0f), swapchainExtent.width / (float)swapchainExtent.height, 0.1f, 10.0f);
+
+		auto scaleM = glm::scale(glm::mat4(1.0f), glm::vec3(scrollScale, scrollScale, scrollScale));
+
+		std::vector<MVP> ubos;
+		for (int i = 0; i < models.size(); ++i) {
+			auto model = scaleM;
+			model = glm::translate(model, models[i].pivot);
+			model = glm::rotate(model, time * glm::radians(90.0f) * models[i].speed, glm::vec3(0.0f, 0.0f, 1.0f)); // then apply rotation
+			model = glm::translate(model, models[i].origin - models[i].pivot); // then move to origin - pivot
+			model = glm::rotate(model, time * glm::radians(90.0f) * models[i].speedSelf, glm::vec3(0.0f, 0.0f, 1.0f)); // then self rotatation
+			model = glm::scale(model, glm::vec3(models[i].sizeScale, models[i].sizeScale, models[i].sizeScale)); // scale first
+			MVP ubo{
+				.model = model,
+				.view = view,
+				.proj = proj,
+			};
+			ubo.proj[1][1] *= -1;
+			ubos.push_back(ubo);
+		}
+		memcpy(uniformBuffersMapped[index], ubos.data(), sizeof(MVP) * models.size());
 	}
 
 	void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, uint32_t frameIndex) {
@@ -1173,17 +1282,17 @@ private:
 			.extent = swapchainExtent,
 		};
 		vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &descriptorSets[frameIndex], 0, nullptr);
 
-		// TODO: add multiple models here
-		VkBuffer vertexBuffers[] = { model.vertexBuffer };
-		VkDeviceSize offsets[] = { 0 };
-		vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-		vkCmdBindIndexBuffer(commandBuffer, model.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+		for (int i = 0; i < models.size(); ++i) {
 
+			VkBuffer vertexBuffers[] = { models[i].vertexBuffer};
+			VkDeviceSize offsets[] = { 0 };
+			vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+			vkCmdBindIndexBuffer(commandBuffer, models[i].indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &descriptorSets[frameIndex], 0, nullptr);
-		vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(model.indices.size()), 1, 0, 0, 0);
+			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &descriptorSets[frameIndex][i], 0, nullptr);
+			vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(models[i].indices.size()), 1, 0, 0, 0);
+		}
 
 		vkCmdEndRenderPass(commandBuffer);
 
@@ -1333,13 +1442,11 @@ static VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR
 }
 
 static VkExtent2D chooseSwapExtent(GLFWwindow* window, const VkSurfaceCapabilitiesKHR& capabilities) {
-	std::cout << "GG" << capabilities.currentExtent.width << " " << capabilities.currentExtent.height << std::endl;
 	if (capabilities.currentExtent.width != (std::numeric_limits<uint32_t>::max)()) {
 		return capabilities.currentExtent;
 	}
 	int width, height;
 	glfwGetFramebufferSize(window, &width, &height);
-	std::cout << "???" << width << " " << height << std::endl;
 	VkExtent2D actualExtent = {
 		static_cast<uint32_t>(width),
 		static_cast<uint32_t>(height),
@@ -1583,41 +1690,6 @@ static void generateMipmaps(VkPhysicalDevice physicalDevice, VkDevice device, Vk
 		1, &barrier
 	);
 	endSingleTimeCommands(device, queue, commandPool, commandBuffer);
-}
-
-static void loadModel(std::string path, std::vector<Vertex>& vertices, std::vector<uint32_t>& indices) {
-	tinyobj::attrib_t attrib;
-	std::vector<tinyobj::shape_t> shapes;
-	std::vector<tinyobj::material_t> materials;
-	std::string warn, err;
-
-	vertices.clear();
-	indices.clear();
-
-	if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str())) {
-		throw std::runtime_error(warn + err);
-	}
-
-	for (const auto& shape : shapes) {
-		for (const auto& index : shape.mesh.indices) {
-			Vertex vertex{};
-			vertex.pos = {
-				attrib.vertices[3 * index.vertex_index + 0],
-				attrib.vertices[3 * index.vertex_index + 1],
-				attrib.vertices[3 * index.vertex_index + 2]
-			};
-
-			vertex.texCoord = {
-				attrib.texcoords[2 * index.texcoord_index + 0],
-				attrib.texcoords[2 * index.texcoord_index + 1]
-			};
-
-			vertex.color = { 1.0f, 1.0f, 1.0f };
-			vertices.push_back(vertex);
-			indices.push_back(indices.size());
-		}
-	}
-
 }
 
 static void transitionImageLayout(VkDevice device, VkQueue queue, VkCommandPool commandPool, VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels) {
