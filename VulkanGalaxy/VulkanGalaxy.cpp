@@ -122,6 +122,9 @@ static void generateMipmaps(VkPhysicalDevice, VkDevice, VkQueue, VkCommandPool, 
 static void loadModel(std::string, std::vector<Vertex>&, std::vector<uint32_t>&);
 static void transitionImageLayout(VkDevice, VkQueue, VkCommandPool, VkImage, VkFormat, VkImageLayout, VkImageLayout, uint32_t);
 static void createImage(VkPhysicalDevice, VkDevice, uint32_t, uint32_t, uint32_t, VkFormat, VkSampleCountFlagBits, VkImageTiling, VkImageUsageFlags, VkMemoryPropertyFlags, VkImage&, VkDeviceMemory&);
+static void copyBuffer(VkDevice, VkQueue, VkCommandPool, VkBuffer, VkBuffer, VkDeviceSize);
+static std::vector<char> readFile(const std::string&);
+static VkShaderModule createShaderModule(VkDevice, const std::vector<char>&);
 
 class Model {
 public:
@@ -131,13 +134,28 @@ public:
 		createTextureImage(physicalDevice, device, queue, commandPool);
 		createTextureImageView(device);
 		createTextureSampler(physicalDevice, device);
+		loadModel();
+		createVertexBuffer(physicalDevice, device, queue, commandPool);
+		createIndexBuffer(physicalDevice, device, queue, commandPool);
 	}
 
 	void destroy(VkDevice device) const {
+		vkDestroyBuffer(device, vertexBuffer, nullptr);
+		vkFreeMemory(device, vertexBufferMemory, nullptr);
+		vkDestroyBuffer(device, indexBuffer, nullptr);
+		vkFreeMemory(device, indexBufferMemory, nullptr);
 		vkDestroyImage(device, textureImage, nullptr);
 		vkDestroyImageView(device, textureImageView, nullptr);
 		vkDestroySampler(device, textureSampler, nullptr);
 		vkFreeMemory(device, textureImageMemory, nullptr);
+	}
+
+	VkDescriptorImageInfo getDescriptorImageInfo() {
+		return VkDescriptorImageInfo{
+			.sampler = textureSampler,
+			.imageView = textureImageView,
+			.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		};
 	}
 private:
 	uint32_t mipLevels;
@@ -147,6 +165,12 @@ private:
 	VkSampler textureSampler;
 	std::string modelPath;
 	std::string texturePath;
+	std::vector<Vertex> vertices;
+	std::vector<uint32_t> indices;
+	VkBuffer vertexBuffer;
+	VkDeviceMemory vertexBufferMemory;
+	VkBuffer indexBuffer;
+	VkDeviceMemory indexBufferMemory;
 
 	// get texture
 	void createTextureImage(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, VkCommandPool commandPool) {
@@ -201,6 +225,82 @@ private:
 			.unnormalizedCoordinates = VK_FALSE,
 		};
 		UT_CHECK_ERR(vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler) == VK_SUCCESS, "failed to create texture sampler");
+	}
+
+	void loadModel() {
+		tinyobj::attrib_t attrib;
+		std::vector<tinyobj::shape_t> shapes;
+		std::vector<tinyobj::material_t> materials;
+		std::string warn, err;
+
+		if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, modelPath.c_str())) {
+			throw std::runtime_error(warn + err);
+		}
+
+		for (const auto& shape : shapes) {
+			for (const auto& index : shape.mesh.indices) {
+				Vertex vertex{};
+				vertex.pos = {
+					attrib.vertices[3 * index.vertex_index + 0],
+					attrib.vertices[3 * index.vertex_index + 1],
+					attrib.vertices[3 * index.vertex_index + 2]
+				};
+
+				vertex.texCoord = {
+					attrib.texcoords[2 * index.texcoord_index + 0],
+					attrib.texcoords[2 * index.texcoord_index + 1]
+				};
+
+				vertex.color = { 1.0f, 1.0f, 1.0f };
+				vertices.push_back(vertex);
+				indices.push_back(indices.size());
+			}
+		}
+
+	}
+
+	void createVertexBuffer(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, VkCommandPool commandPool) {
+		VkDeviceSize size = sizeof(vertices) * vertices.size();
+		VkBuffer stagingBuffer;
+		VkDeviceMemory stagingBufferMemory;
+		createBuffer(physicalDevice, device, size,
+			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			stagingBuffer, stagingBufferMemory);
+		void* data;
+		vkMapMemory(device, stagingBufferMemory, 0, size, 0, &data);
+		memcpy(data, vertices.data(), (size_t)size);
+		vkUnmapMemory(device, stagingBufferMemory);
+
+		createBuffer(physicalDevice, device, size,
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			vertexBuffer, vertexBufferMemory);
+		copyBuffer(device, queue, commandPool, stagingBuffer, vertexBuffer, size);
+		vkDestroyBuffer(device, stagingBuffer, nullptr);
+		vkFreeMemory(device, stagingBufferMemory, nullptr);
+	}
+
+	void createIndexBuffer(VkPhysicalDevice physicalDevice, VkDevice device, VkQueue queue, VkCommandPool commandPool) {
+		VkDeviceSize size = sizeof(indices) * indices.size();
+		VkBuffer stagingBuffer;
+		VkDeviceMemory stagingBufferMemory;
+		createBuffer(physicalDevice, device, size,
+			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			stagingBuffer, stagingBufferMemory);
+		void* data;
+		vkMapMemory(device, stagingBufferMemory, 0, size, 0, &data);
+		memcpy(data, indices.data(), (size_t)size);
+		vkUnmapMemory(device, stagingBufferMemory);
+
+		createBuffer(physicalDevice, device, size,
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			indexBuffer, indexBufferMemory);
+		copyBuffer(device, queue, commandPool, stagingBuffer, indexBuffer, size);
+		vkDestroyBuffer(device, stagingBuffer, nullptr);
+		vkFreeMemory(device, stagingBufferMemory, nullptr);
 	}
 };
 
@@ -287,6 +387,9 @@ private:
 	std::vector<VkBuffer> uniformBuffers; // for model projection matrix
 	std::vector<VkDeviceMemory> uniformBuffersMemory;
 	std::vector<void*> uniformBuffersMapped;
+	std::vector<VkDescriptorSet> descriptorSets;
+	VkPipelineLayout graphicsPipelineLayout;
+	VkPipeline graphicsPipeline;
 
 	Model model;
 
@@ -320,6 +423,9 @@ private:
 		createDescriptorSetLayout();
 		createUniformBuffers();
 		createModels();
+		createDescriptorPool();
+		createDescriptorSets();
+		createGraphicsPipeline();
 	}
 
 	// create vulkan instance for all
@@ -585,7 +691,6 @@ private:
 
 	// descriptor, only related to shader
 	void createDescriptorSetLayout() {
-		// TODO: support multiple models
 		VkDescriptorSetLayoutBinding uboLayoutBinding{
 			.binding = 0,
 			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -654,6 +759,223 @@ private:
 		model.createModel("./models/earth.obj", "./textures/earth.png", physicalDevice, device, uniformQueue, commandPool);
 	}
 
+	void createDescriptorPool() {
+		// TODO: increase pool size
+		std::array<VkDescriptorPoolSize, 2> poolSizes{};
+		poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+		poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+		VkDescriptorPoolCreateInfo poolInfo{
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+			.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT),
+			.poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
+			.pPoolSizes = poolSizes.data(),
+		};
+		UT_CHECK_ERR(vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) == VK_SUCCESS, "failed to create descriptor pool");
+	}
+
+	void createDescriptorSets() {
+		std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
+		VkDescriptorSetAllocateInfo allocInfo{
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+			.descriptorPool = descriptorPool,
+			.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT),
+			.pSetLayouts = layouts.data(),
+		};
+		descriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
+		UT_CHECK_ERR(vkAllocateDescriptorSets(device, &allocInfo, descriptorSets.data()) == VK_SUCCESS, "failed to allocate descriptor sets");
+		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+			VkDescriptorBufferInfo bufferInfo{
+				.buffer = uniformBuffers[i],
+				.offset = 0,
+				.range = sizeof(MVP),
+			};
+			// TODO: add descriptors of different models
+			std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+			descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptorWrites[0].dstSet = descriptorSets[i];
+			descriptorWrites[0].dstBinding = 0;
+			descriptorWrites[0].dstArrayElement = 0;
+			descriptorWrites[0].descriptorCount = 1;
+			descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			descriptorWrites[0].pImageInfo = nullptr;
+			descriptorWrites[0].pBufferInfo = &bufferInfo;
+			descriptorWrites[0].pTexelBufferView = nullptr;
+
+			auto info = model.getDescriptorImageInfo();
+			descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptorWrites[1].dstSet = descriptorSets[i];
+			descriptorWrites[1].dstBinding = 1;
+			descriptorWrites[1].dstArrayElement = 0;
+			descriptorWrites[1].descriptorCount = 1;
+			descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			descriptorWrites[1].pImageInfo = &info;
+			descriptorWrites[1].pBufferInfo = nullptr;
+			descriptorWrites[1].pTexelBufferView = nullptr;
+			vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+		}
+	}
+
+	void createGraphicsPipeline() {
+		auto vertShaderCode = readFile("./shaders/vert.spv");
+		auto fragShaderCode = readFile("./shaders/frag.spv");
+
+		VkShaderModule vertShaderModule = createShaderModule(device, vertShaderCode);
+		VkShaderModule fragShaderModule = createShaderModule(device, fragShaderCode);
+
+		VkPipelineShaderStageCreateInfo vertShaderStageInfo{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.stage = VK_SHADER_STAGE_VERTEX_BIT,
+			.module = vertShaderModule,
+			.pName = "main",
+		};
+
+		VkPipelineShaderStageCreateInfo fragShaderStageInfo{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+			.module = fragShaderModule,
+			.pName = "main",
+		};
+
+		VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+
+		auto bindingDescription = Vertex::getBindingDescription();
+		auto attrbuteDescriptions = Vertex::getAttributeDescriptions();
+		VkPipelineVertexInputStateCreateInfo vertexInputInfo{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+			.vertexBindingDescriptionCount = 1,
+			.pVertexBindingDescriptions = &bindingDescription,
+			.vertexAttributeDescriptionCount = static_cast<uint32_t>(attrbuteDescriptions.size()),
+			.pVertexAttributeDescriptions = attrbuteDescriptions.data(),
+		};
+
+		VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+			.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+			.primitiveRestartEnable = VK_FALSE,
+		};
+
+		VkViewport viewport{
+			.x = 0.0f,
+			.y = 0.0f,
+			.width = (float)swapchainExtent.width,
+			.height = (float)swapchainExtent.height,
+			.minDepth = 0.0f,
+			.maxDepth = 1.0f,
+		};
+
+		VkRect2D scissor{
+			.offset = {0, 0},
+			.extent = swapchainExtent,
+		};
+
+		VkPipelineViewportStateCreateInfo viewportState{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+			.viewportCount = 1,
+			.pViewports = &viewport,
+			.scissorCount = 1,
+			.pScissors = &scissor,
+		};
+
+		VkPipelineRasterizationStateCreateInfo rasterizer{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+			.depthClampEnable = VK_FALSE,
+			.rasterizerDiscardEnable = VK_FALSE,
+			.polygonMode = VK_POLYGON_MODE_FILL,
+			.cullMode = VK_CULL_MODE_BACK_BIT,
+			.frontFace = VK_FRONT_FACE_CLOCKWISE,
+			.depthBiasEnable = VK_FALSE,
+			.depthBiasConstantFactor = 0.0f,
+			.depthBiasClamp = 0.0f,
+			.depthBiasSlopeFactor = 0.0f,
+			.lineWidth = 1.0f,
+		};
+
+		// TODO: msaa samples
+		auto samples = VK_SAMPLE_COUNT_2_BIT;
+		VkPipelineMultisampleStateCreateInfo multisampling{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+			.rasterizationSamples = samples,
+			.sampleShadingEnable = VK_FALSE,
+			.minSampleShading = 1.0f,
+			.pSampleMask = nullptr,
+			.alphaToCoverageEnable = VK_FALSE,
+			.alphaToOneEnable = VK_FALSE,
+		};
+
+		VkPipelineDepthStencilStateCreateInfo depthStencil{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+			.depthTestEnable = VK_TRUE,
+			.depthWriteEnable = VK_TRUE,
+			.depthCompareOp = VK_COMPARE_OP_LESS,
+			.depthBoundsTestEnable = VK_FALSE,
+			.stencilTestEnable = VK_FALSE,
+			.minDepthBounds = 0.0f,
+			.maxDepthBounds = 1.0f,
+		};
+
+		VkPipelineColorBlendAttachmentState colorBlendAttachment{
+			.blendEnable = VK_FALSE,
+			.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+		};
+
+		VkPipelineColorBlendStateCreateInfo colorBlending{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+			.logicOpEnable = VK_FALSE,
+			.logicOp = VK_LOGIC_OP_COPY,
+			.attachmentCount = 1,
+			.pAttachments = &colorBlendAttachment,
+		};
+		colorBlending.blendConstants[0] = 0.0f;
+		colorBlending.blendConstants[1] = 0.0f;
+		colorBlending.blendConstants[2] = 0.0f;
+		colorBlending.blendConstants[3] = 0.0f;
+
+		VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+			.setLayoutCount = 1,
+			.pSetLayouts = &descriptorSetLayout,
+			.pushConstantRangeCount = 0,
+			.pPushConstantRanges = nullptr,
+		};
+		UT_CHECK_ERR(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &graphicsPipelineLayout) == VK_SUCCESS, "failed to create pipeline layout");
+
+		std::vector<VkDynamicState> dynamicStates = {
+			VK_DYNAMIC_STATE_VIEWPORT,
+			VK_DYNAMIC_STATE_SCISSOR
+		};
+
+		VkPipelineDynamicStateCreateInfo dynamicState{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+			.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()),
+			.pDynamicStates = dynamicStates.data(),
+		};
+
+		VkGraphicsPipelineCreateInfo pipelineInfo{
+			.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+			.stageCount = 2,
+			.pStages = shaderStages,
+			.pVertexInputState = &vertexInputInfo,
+			.pInputAssemblyState = &inputAssembly,
+			.pViewportState = &viewportState,
+			.pRasterizationState = &rasterizer,
+			.pMultisampleState = &multisampling,
+			.pDepthStencilState = &depthStencil,
+			.pColorBlendState = &colorBlending,
+			.pDynamicState = &dynamicState,
+			.layout = graphicsPipelineLayout,
+			.renderPass = renderPass,
+			.subpass = 0,
+			.basePipelineHandle = VK_NULL_HANDLE,
+			.basePipelineIndex = -1,
+		};
+		UT_CHECK_ERR(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) == VK_SUCCESS, "failed to create graphics pipeline");
+
+		vkDestroyShaderModule(device, fragShaderModule, nullptr);
+		vkDestroyShaderModule(device, vertShaderModule, nullptr);
+	}
+
 	void cleanupSwapchain() {
 		colorImage.destroy(device);
 		depthImage.destroy(device);
@@ -672,8 +994,11 @@ private:
 	void cleanup() {
 		cleanupSwapchain();
 
+		vkDestroyPipeline(device, graphicsPipeline, nullptr);
+		vkDestroyPipelineLayout(device, graphicsPipelineLayout, nullptr);
 		model.destroy(device);
 
+		vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 		vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 			vkDestroyBuffer(device, uniformBuffers[i], nullptr);
@@ -1155,6 +1480,41 @@ static void createImage(VkPhysicalDevice physicalDevice, VkDevice device, uint32
 		throw std::runtime_error("failed to allocate image memory");
 	}
 	vkBindImageMemory(device, image, imageMemory, 0);
+}
+
+static void copyBuffer(VkDevice device, VkQueue queue, VkCommandPool commandPool, VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+	VkCommandBuffer commandBuffer = beginSingleTimeCommands(device, commandPool);
+	VkBufferCopy copyRegion{
+		.srcOffset = 0,
+		.dstOffset = 0,
+		.size = size,
+	};
+	vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+	endSingleTimeCommands(device, queue, commandPool, commandBuffer);
+}
+
+static std::vector<char> readFile(const std::string& filename) {
+	std::ifstream file(filename, std::ios::ate | std::ios::binary);
+	if (!file.is_open()) {
+		throw std::runtime_error("failed to open file");
+	}
+	size_t fileSize = (size_t)file.tellg();
+	std::vector<char> buffer(fileSize);
+	file.seekg(0);
+	file.read(buffer.data(), fileSize);
+	file.close();
+	return buffer;
+}
+
+static VkShaderModule createShaderModule(VkDevice device, const std::vector<char>& code) {
+	VkShaderModuleCreateInfo createInfo{
+		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		.codeSize = code.size(),
+		.pCode = reinterpret_cast<const uint32_t*>(code.data())
+	};
+	VkShaderModule shaderModule;
+	UT_CHECK_ERR(vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) == VK_SUCCESS, "failed to create shader module");
+	return shaderModule;
 }
 
 int main() {
