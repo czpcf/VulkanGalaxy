@@ -396,8 +396,23 @@ private:
 	std::vector<VkSemaphore> renderFinishedSemaphores;
 	std::vector<VkFence> inFlightFences;
 	int currentFrame = 0;
+	VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT; // TODO: things may be incorrecnt if msaa == 1
 
 	Model model;
+
+	VkSampleCountFlagBits getMaxUsableSampleCount() {
+		VkPhysicalDeviceProperties physicalDeviceProperties;
+		vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
+
+		VkSampleCountFlags counts = physicalDeviceProperties.limits.framebufferColorSampleCounts & physicalDeviceProperties.limits.framebufferDepthSampleCounts;
+		if (counts & VK_SAMPLE_COUNT_64_BIT) return VK_SAMPLE_COUNT_64_BIT;
+		if (counts & VK_SAMPLE_COUNT_32_BIT) return VK_SAMPLE_COUNT_32_BIT;
+		if (counts & VK_SAMPLE_COUNT_16_BIT) return VK_SAMPLE_COUNT_16_BIT;
+		if (counts & VK_SAMPLE_COUNT_8_BIT) return VK_SAMPLE_COUNT_8_BIT;
+		if (counts & VK_SAMPLE_COUNT_4_BIT) return VK_SAMPLE_COUNT_4_BIT;
+		if (counts & VK_SAMPLE_COUNT_2_BIT) return VK_SAMPLE_COUNT_2_BIT;
+		return VK_SAMPLE_COUNT_1_BIT;
+	}
 
 	// initialize the window using glfw
 	void initWindow() {
@@ -499,7 +514,7 @@ private:
 			details = querySwapchainSupport(device, surface);
 			if (isDeviceSuitable(device, surface)) {
 				physicalDevice = device;
-				// TODO: add msaa
+				msaaSamples = getMaxUsableSampleCount();
 				break;
 			}
 		}
@@ -621,11 +636,9 @@ private:
 
 	// render pass
 	void createRenderPass() {
-		// TODO: msaa
-		auto samples = VK_SAMPLE_COUNT_2_BIT;
 		VkAttachmentDescription colorAttachment{
 			.format = swapchainImageFormat,
-			.samples = samples,
+			.samples = msaaSamples,
 			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
 			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
 			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
@@ -635,7 +648,7 @@ private:
 		};
 		VkAttachmentDescription depthAttachment{
 			.format = findDepthFormat(physicalDevice),
-			.samples = samples,
+			.samples = msaaSamples,
 			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
 			.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
 			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
@@ -730,17 +743,15 @@ private:
 		VkFormat colorFormat = swapchainImageFormat;
 		uint32_t width = swapchainExtent.width;
 		uint32_t height = swapchainExtent.height;
-		// TODO: msaa
-		VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_2_BIT;
 		colorImage.create(physicalDevice, device, width, height, 1, colorFormat,
-			samples,
+			msaaSamples,
 			VK_IMAGE_TILING_OPTIMAL,
 			VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 			VK_IMAGE_ASPECT_COLOR_BIT);
 		auto depthFormat = findDepthFormat(physicalDevice);
 		depthImage.create(physicalDevice, device, width, height, 1, depthFormat,
-			samples,
+			msaaSamples,
 			VK_IMAGE_TILING_OPTIMAL,
 			VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
@@ -900,11 +911,9 @@ private:
 			.lineWidth = 1.0f,
 		};
 
-		// TODO: msaa samples
-		auto samples = VK_SAMPLE_COUNT_2_BIT;
 		VkPipelineMultisampleStateCreateInfo multisampling{
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-			.rasterizationSamples = samples,
+			.rasterizationSamples = msaaSamples,
 			.sampleShadingEnable = VK_FALSE,
 			.minSampleShading = 1.0f,
 			.pSampleMask = nullptr,
@@ -1239,8 +1248,8 @@ static bool isDeviceSuitable(VkPhysicalDevice device, VkSurfaceKHR& surface) {
 	}
 	VkPhysicalDeviceFeatures supportedFeatures;
 	vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
-	// TODO: check samplerAnisotropy if msaa is required
-	return indices.isComplete() && extensionsSupported && swapChainAdequate;
+
+	return indices.isComplete() && extensionsSupported && swapChainAdequate && supportedFeatures.samplerAnisotropy;
 }
 
 static SwapchainSupportDetails querySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR& surface) {
