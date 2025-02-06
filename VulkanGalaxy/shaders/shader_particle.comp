@@ -1,0 +1,69 @@
+#version 450
+
+struct Particle {
+	vec3 x;
+	vec3 colorX;
+	vec2 texCoordX;
+	vec3 y;
+	vec3 colorY;
+	vec2 texCoordY;
+	vec3 z;
+	vec3 colorZ;
+	vec2 texCoordZ;
+	vec3 w;
+	vec3 colorW;
+	vec2 texCoordW;
+	float radius;
+	float theta;
+};
+
+struct ParticleOutput {
+	vec3 worldX;
+	vec3 colorX;
+	vec2 texCoordX;
+	vec3 worldY;
+	vec3 colorY;
+	vec2 texCoordY;
+	vec3 worldZ;
+	vec3 colorZ;
+	vec2 texCoordZ;
+	vec3 worldW;
+	vec3 colorW;
+	vec2 texCoordW;
+};
+
+layout(binding = 0) uniform UniformBufferParticleObject {
+	mat4 model;
+	mat4 view;
+	mat4 proj;
+	float deltaTime;
+} ubo;
+
+layout(std140, binding = 2) readonly buffer ParticleSSBOIn {
+	Particle particlesIn[];
+};
+
+layout(std140, binding = 3) buffer ParticlesSSBOOut {
+	ParticleOutput particlesOut[];
+};
+
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	Particle particleIn = particlesIn[index];
+	float radius = particleIn.radius;
+	float theta = particleIn.theta + ubo.deltaTime / radius;
+	particlesOut[index].worldX = particleIn.x + vec3(cos(theta) * radius, sin(theta) * radius, 0.0f);
+	particlesOut[index].colorX = particleIn.colorX;
+	particlesOut[index].texCoordX = particleIn.texCoordX;
+	particlesOut[index].worldY = particleIn.y + vec3(cos(theta) * radius, sin(theta) * radius, 0.0f);
+	particlesOut[index].colorY = particleIn.colorY;
+	particlesOut[index].texCoordY = particleIn.texCoordY;
+	particlesOut[index].worldZ = particleIn.z + vec3(cos(theta) * radius, sin(theta) * radius, 0.0f);
+	particlesOut[index].colorZ = particleIn.colorZ;
+	particlesOut[index].texCoordZ = particleIn.texCoordZ;
+	particlesOut[index].worldW = particleIn.w + vec3(cos(theta) * radius, sin(theta) * radius, 0.0f);
+	particlesOut[index].colorW = particleIn.colorW;
+	particlesOut[index].texCoordW = particleIn.texCoordW;
+}
