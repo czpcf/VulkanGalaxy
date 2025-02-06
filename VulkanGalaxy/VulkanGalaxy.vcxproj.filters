@@ -29,4 +29,18 @@
     <None Include="shaders\shader.vert" />
     <None Include="shaders\shader_particle.comp" />
   </ItemGroup>
+  <ItemGroup>
+    <Object Include="models\ball.obj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="textures\earth.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="textures\particle.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="textures\sun.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+  </ItemGroup>
 </Project>

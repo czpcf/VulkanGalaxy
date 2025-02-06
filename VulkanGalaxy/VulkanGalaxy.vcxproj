@@ -148,6 +148,14 @@
     <None Include="shaders\shader.frag" />
     <None Include="shaders\shader.vert" />
   </ItemGroup>
+  <ItemGroup>
+    <Object Include="models\ball.obj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="textures\earth.png" />
+    <Image Include="textures\particle.png" />
+    <Image Include="textures\sun.png" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
