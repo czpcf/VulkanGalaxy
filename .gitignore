@@ -98,6 +98,8 @@ StyleCopReport.xml
 *.svclog
 *.scc
 
+!ball.obj
+
 # Chutzpah Test files
 _Chutzpah*
 
