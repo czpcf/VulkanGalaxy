@@ -969,7 +969,7 @@ private:
 		};
 
 		uint32_t queueFamilyIndices[] = { indices.uniformFamily.value(), indices.presentFamily.value() };
-		if (indices.uniformFamily != indices.presentFamily) {
+		if (indices.uniformFamily != indices.presentFamily) { // TODO: fix WAW problem
 			createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
 			createInfo.queueFamilyIndexCount = 2;
 			createInfo.pQueueFamilyIndices = queueFamilyIndices;
@@ -1085,9 +1085,9 @@ private:
 		VkSubpassDependency dependency{
 			.srcSubpass = VK_SUBPASS_EXTERNAL,
 			.dstSubpass = 0,
-			.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+			.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 			.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-			.srcAccessMask = 0,
+			.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
 			.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
 		};
 
@@ -1784,7 +1784,6 @@ private:
 
 	void drawFrame(double deltaTime) {
 		vkWaitForFences(device, 1, &computeInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-		updateUniformBuffer(currentFrame, deltaTime);
 		vkResetFences(device, 1, &computeInFlightFences[currentFrame]);
 		vkResetCommandBuffer(computeCommandBuffers[currentFrame], 0);
 		recordComputeCommandBuffer(computeCommandBuffers[currentFrame], currentFrame);
@@ -1809,6 +1808,7 @@ private:
 		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
 			throw std::runtime_error("failed to acquire swapchain image");
 		}
+		updateUniformBuffer(currentFrame, deltaTime);
 		// reset the fence
 		vkResetFences(device, 1, &inFlightFences[currentFrame]);
 		//// update uniform buffers like camera, model transformation, ...
@@ -1909,15 +1909,21 @@ static QueueFamilyIndices findQueueFamilyProperties(VkPhysicalDevice device, VkS
 	int i = 0;
 	for (const auto& queueFamily : queueFamilies) {
 		if ((queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) && (queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT)) {
-			indices.uniformFamily = i;
+			//if (!indices.uniformFamily.has_value()) {
+				indices.uniformFamily = i;
+			//}
 		}
 		VkBool32 presentSupport = false;
 		vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
 		if (presentSupport) {
 			indices.presentFamily = i;
 		}
+		if (indices.isComplete()) {
+			break;
+		}
 		++i;
 	}
+	std::cout << indices.presentFamily.value() << " " << indices.uniformFamily.value() << std::endl;
 	return indices;
 }
 
