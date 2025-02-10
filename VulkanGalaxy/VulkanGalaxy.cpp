@@ -895,6 +895,7 @@ private:
 			if (isDeviceSuitable(device, surface)) {
 				physicalDevice = device;
 				msaaSamples = getMaxUsableSampleCount();
+				std::cout << deviceProperties.deviceName << " " << indices.presentFamily.value() << " " << indices.uniformFamily.value() << std::endl;
 				break;
 			}
 		}
@@ -969,8 +970,8 @@ private:
 		};
 
 		uint32_t queueFamilyIndices[] = { indices.uniformFamily.value(), indices.presentFamily.value() };
-		if (indices.uniformFamily != indices.presentFamily) { // TODO: fix WAW problem
-			createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+		if (indices.uniformFamily != indices.presentFamily) {
+			createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 			createInfo.queueFamilyIndexCount = 2;
 			createInfo.pQueueFamilyIndices = queueFamilyIndices;
 		} else {
@@ -1909,9 +1910,9 @@ static QueueFamilyIndices findQueueFamilyProperties(VkPhysicalDevice device, VkS
 	int i = 0;
 	for (const auto& queueFamily : queueFamilies) {
 		if ((queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) && (queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT)) {
-			//if (!indices.uniformFamily.has_value()) {
+			if (!indices.uniformFamily.has_value()) {
 				indices.uniformFamily = i;
-			//}
+			}
 		}
 		VkBool32 presentSupport = false;
 		vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
@@ -1919,7 +1920,7 @@ static QueueFamilyIndices findQueueFamilyProperties(VkPhysicalDevice device, VkS
 			indices.presentFamily = i;
 		}
 		if (indices.isComplete()) {
-			break;
+			//break;
 		}
 		++i;
 	}
